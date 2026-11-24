@@ -1,19 +1,29 @@
 type Status = 'connecting' | 'listening' | 'paused' | 'error'
 
+interface Top3Item {
+  sender: string
+  text: string
+}
+
 let statusEl: HTMLDivElement
 let finalEl: HTMLSpanElement
 let interimEl: HTMLSpanElement
+let top3El: HTMLUListElement
 
 export function mountUi() {
   const app = document.querySelector<HTMLDivElement>('#app')!
   app.innerHTML = `
     <main class="panel">
       <header>
-        <h1>ASR Demo</h1>
+        <h1>Glance Reply</h1>
         <div id="status" class="status status-connecting">Connecting…</div>
       </header>
       <section class="transcript" aria-live="polite">
         <span id="final"></span><span id="interim" class="interim"></span>
+      </section>
+      <section class="top3">
+        <h2>Top 3 Urgent</h2>
+        <ul id="top3" class="top3-list"></ul>
       </section>
       <footer>Tap the glasses temple to pause · double-tap to exit.</footer>
     </main>
@@ -21,6 +31,7 @@ export function mountUi() {
   statusEl = app.querySelector<HTMLDivElement>('#status')!
   finalEl = app.querySelector<HTMLSpanElement>('#final')!
   interimEl = app.querySelector<HTMLSpanElement>('#interim')!
+  top3El = app.querySelector<HTMLUListElement>('#top3')!
   injectStyles()
 }
 
@@ -34,6 +45,26 @@ export function setTranscript(finalText: string, interimText: string) {
   if (!finalEl) return
   finalEl.textContent = finalText
   interimEl.textContent = interimText
+}
+
+export function setTop3(items: Top3Item[]) {
+  if (!top3El) return
+  if (items.length === 0) {
+    top3El.innerHTML = '<li class="top3-empty">No messages yet — DM the bot</li>'
+    return
+  }
+  top3El.innerHTML = items
+    .map((item) => `<li><strong>${escapeHtml(item.sender)}:</strong> ${escapeHtml(item.text)}</li>`)
+    .join('')
+}
+
+function escapeHtml(s: string) {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
 }
 
 function injectStyles() {
@@ -61,6 +92,12 @@ function injectStyles() {
       border-radius: 12px; padding: 20px; font-size: 18px; line-height: 1.5;
       min-height: 180px; white-space: pre-wrap; word-break: break-word; }
     .interim { color: #919191; }
+    .top3 { background: #2E2E2E; border: 1px solid #3E3E3E; border-radius: 12px; padding: 16px; }
+    .top3 h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: #A7A7A7; text-transform: uppercase; letter-spacing: 0.04em; }
+    .top3-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .top3-list li { font-size: 15px; line-height: 1.4; color: #E5E5E5; white-space: normal; word-break: break-word; }
+    .top3-list li strong { color: #3CFA44; }
+    .top3-empty { color: #7B7B7B; font-style: italic; text-align: center; padding: 16px 0; }
     footer { font-size: 12px; color: #7B7B7B; text-align: center; }
   `
   const style = document.createElement('style')

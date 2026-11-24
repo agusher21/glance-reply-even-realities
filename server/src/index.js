@@ -63,11 +63,30 @@ if (DEMO_MODE) {
 
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
-  res.writeHead(status, { 'content-type': 'application/json' });
+  res.writeHead(status, {
+    'content-type': 'application/json',
+    'access-control-allow-origin': '*',
+    'access-control-allow-methods': 'GET, OPTIONS',
+    'access-control-allow-headers': 'content-type',
+  });
   res.end(body);
 }
 
+function handleOptions(req, res) {
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'access-control-allow-origin': '*',
+      'access-control-allow-methods': 'GET, OPTIONS',
+      'access-control-allow-headers': 'content-type',
+    });
+    res.end();
+    return true;
+  }
+  return false;
+}
+
 const server = http.createServer((req, res) => {
+  if (handleOptions(req, res)) return;
   const url = new URL(req.url, 'http://localhost');
   if (req.method === 'GET' && url.pathname === '/healthz') {
     return sendJson(res, 200, { ok: true });

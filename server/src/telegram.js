@@ -155,8 +155,17 @@ export class TelegramPoller {
         }
       } catch (err) {
         if (err.name === 'AbortError' || !this.#running) break;
-        console.log(`[telegram] poll error (${err.message}) — retrying in 5s`);
-        await new Promise((r) => setTimeout(r, 5000));
+        const msg = String(err.message ?? err);
+        const retryAfterMatch = msg.match(/retry after (\d+)/i);
+        let sleepMs = 5000;
+        if (retryAfterMatch) {
+          const seconds = Math.min(parseInt(retryAfterMatch[1], 10), 65);
+          sleepMs = (seconds + 2) * 1000;
+          console.log(`[telegram] rate limited — retry after ${seconds}s (sleeping ${sleepMs}ms)`);
+        } else {
+          console.log(`[telegram] poll error (${err.message}) — retrying in 5s`);
+        }
+        await new Promise((r) => setTimeout(r, sleepMs));
       }
     }
     console.log('[telegram] polling stopped');
