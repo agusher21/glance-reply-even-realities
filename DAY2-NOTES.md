@@ -64,6 +64,15 @@ review fixes were applied locally by the coordinator and are marked below.
   live backend and check /api/unread + /api/top3 for real messages, then re-verify in
   the sim. If it still 429s, wait longer (flood-control blocks can last up to ~1h)
   and retry single probes only — never hammer.
+- PROBE RESULT 24 Nov 02:37:06 UTC: after ~5.5 min of complete silence (zero Telegram
+  requests from this side), ONE single getMe still returned 429 retry_after 32.
+  Conclusion: the block is NOT a simple 32s countdown — it is an escalated
+  flood-control restriction on this bot token that outlasts a 5-min silence. Do NOT
+  restart the poller (it would only re-extend the block). Next: wait 30–60 min, then
+  retry with single getMe probes only, spaced minutes apart; start the live backend
+  only after a single getMe succeeds. (Alternative hypothesis, unproven: the egress
+  proxy's shared IP may contribute to the 429; nothing else on this VM uses the token —
+  verified by process list.)
 - /api/unread and /api/top3 are both [] so far: NO real Telegram message has been
   ingested yet. Nobody has DM'd @Glance_replaybot or added it to a test group with a
   message since Day 1 — that still needs a Telegram user (Toni) to do it.
