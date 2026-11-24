@@ -22,6 +22,7 @@ import http from 'node:http';
 import { UnreadStore } from './store.js';
 import { rankUnread } from './rank.js';
 import { createPollerFromEnv } from './telegram.js';
+import { handleVoice, getLatestVoice } from './voice.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const DEMO_MODE = process.env.DEMO_MODE === '1' || process.argv.includes('--demo');
@@ -66,7 +67,7 @@ function sendJson(res, status, payload) {
   res.writeHead(status, {
     'content-type': 'application/json',
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET, OPTIONS',
+    'access-control-allow-methods': 'GET, POST, OPTIONS',
     'access-control-allow-headers': 'content-type',
   });
   res.end(body);
@@ -76,7 +77,7 @@ function handleOptions(req, res) {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       'access-control-allow-origin': '*',
-      'access-control-allow-methods': 'GET, OPTIONS',
+      'access-control-allow-methods': 'GET, POST, OPTIONS',
       'access-control-allow-headers': 'content-type',
     });
     res.end();
@@ -96,6 +97,12 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/api/unread') {
     return sendJson(res, 200, store.list());
+  }
+  if (req.method === 'POST' && url.pathname === '/api/voice') {
+    return handleVoice(req, res, store);
+  }
+  if (req.method === 'GET' && url.pathname === '/api/voice/latest') {
+    return sendJson(res, 200, getLatestVoice());
   }
   return sendJson(res, 404, { error: 'not found' });
 });
