@@ -77,6 +77,30 @@ review fixes were applied locally by the coordinator and are marked below.
   ingested yet. Nobody has DM'd @Glance_replaybot or added it to a test group with a
   message since Day 1 — that still needs a Telegram user (Toni) to do it.
 
+## LIVE INGEST PROOF — 24 Nov 2026 ~21:20–21:21 WIB (Toni: "dm+grup don")
+
+- Live backend (started 21:10 WIB, server/run-live.py, demo=false) polling as
+  @Glance_replaybot. GET /api/unread + /api/top3 both return the same 2 real
+  messages, rank order correct (DM first):
+  1. DM, chat 1103227126, tonibanzai, "Bro", 21:20:48 WIB
+  2. Group, chat -1004454137148, tonibanzai, "Damang bre", 21:21:02 WIB
+- COUNT CAVEAT: 2 messages seen, not the 3 expected (2 DMs + 1 group). Second
+  DM not in /api/unread after two checks 8s apart. Possible causes: sent after
+  the checks, or missed during a poller flap (see below). Toni to confirm /
+  re-send the second DM.
+- RESOLVED 24 Nov ~21:22:49 WIB: Toni re-sent a DM ("Gass") and it arrived —
+  /api/unread + /api/top3 now show DM "Gass" (21:22:49) + group "Damang bre".
+  The earlier DM "Bro" is gone from the list: **the unread store keeps only
+  the LATEST message per chat** (one entry per chatId), so "Gass" superseded
+  "Bro". All 3 messages were received in total; the store shows 2 entries.
+  This latest-per-chat behaviour is by design for a top-3 glance list — note
+  it for the Day-3 reply flow (a draft replies to the latest message in the
+  chat).
+- Poller flapping observed in server/live.log: repeated "poll error (fetch
+  failed) — retrying in 5s" + server restarts (listening lines). Zero 429s in
+  this log — these are fetch/network failures, not flood control. Messages
+  still get through between flakes.
+
 ## Remaining Day-3 gate
 
 Groq Whisper STT wiring (src/asr/stt.ts stub throws "STT PROVIDER NOT IMPLEMENTED";
