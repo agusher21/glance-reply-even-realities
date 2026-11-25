@@ -167,9 +167,19 @@ async function fetchAndRenderTop3() {
     // Skip glasses rebuild while voice/digest mode is active
     if (voiceMode || digestMode) return
 
-    renderGlassesPage('Glance Reply - top 3', itemName)
+    renderGlassesPage('Top 3', itemName)
+    setStatus('listening', 'Top 3 loaded · tap to pause mic · double-tap to exit')
   } catch (err) {
     console.error('Failed to fetch top3: ' + (err instanceof Error ? err.message + ' | ' + err.stack : String(err)))
+    // Render network error on glasses (not just webview)
+    if (!voiceMode && !digestMode) {
+      renderGlassesPage('No network', ['Check connection', 'Tap to retry', ''])
+      // Record the error screen as the current page, or the CLICK handler's
+      // isErrorScreen check can never match and a tap would toggle the mic
+      // instead of retrying the fetch.
+      lastTop3Json = JSON.stringify(['Check connection', 'Tap to retry', ''])
+      setStatus('error', 'No network — tap to retry')
+    }
   }
 }
 
@@ -244,8 +254,17 @@ try {
       setTranscript(finalText, interimText)
     },
     (err) => {
-      setStatus('error', `STT error: ${(err as Error)?.message ?? err}`)
+      const msg = `STT error: ${(err as Error)?.message ?? err}`
+      setStatus('error', msg)
       console.error('STT error:', err)
+      // Render STT error on glasses
+      if (!voiceMode && !digestMode) {
+        renderGlassesPage('STT failed', ['Mic error', 'Tap to retry', ''])
+        // Record the error screen as the current page so a tap retries the
+        // fetch (see the isErrorScreen check in the CLICK handler).
+        lastTop3Json = JSON.stringify(['Mic error', 'Tap to retry', ''])
+        setStatus('error', 'STT failed — tap to retry')
+      }
     },
     (result) => {
       showVoiceResult(result)
@@ -360,11 +379,13 @@ function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeLis
 //   • Taps/double-taps/lifecycle come through `event.sysEvent`.
 //     Audio PCM frames come through `event.audioEvent` — separate branch.
 //   • List item taps come through `event.listEvent` with `currentSelectItemIndex`.
+//   • Tap-handler trap (prep §1): DOUBLE_CLICK (3), SCROLL_TOP (1),
+//     SCROLL_BOTTOM (2) matched FIRST; CLICK (0) is the fallback checked LAST.
+//     `eventType` default resolved INSIDE the envelope check (eventTypeOf).
 //   • Double-tap → `shutDownPageContainer(1)` is a root-level check: it
 //     must fire no matter which envelope the event arrives in, so users
 //     can always exit the app. System exit confirmation dialog appears;
 //     SYSTEM_EXIT_EVENT fires on confirm and we clean up there.
-//   • Check DOUBLE_CLICK_EVENT before CLICK_EVENT.
 const unsubscribe = bridge.onEvenHubEvent((event: EvenHubEvent) => {
   const pcm = event.audioEvent?.audioPcm
   if (pcm) stt?.sendPcm(pcm)
@@ -372,8 +393,20 @@ const unsubscribe = bridge.onEvenHubEvent((event: EvenHubEvent) => {
   const sysType = eventTypeOf(event.sysEvent)
   const textType = eventTypeOf(event.textEvent)
 
+  // 1. DOUBLE_CLICK — always exit, highest priority
   if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     bridge.shutDownPageContainer(1)
+    return
+  }
+
+  // 2. SCROLL_TOP / SCROLL_BOTTOM — navigation events (matched before CLICK)
+  // On the G2, these come from the touchpad scroll zones. We handle them
+  // for completeness; with only 3 items there's nowhere to scroll, so they
+  // are no-ops but explicitly consumed so they don't fall through to CLICK.
+  if (sysType === OsEventTypeList.SCROLL_TOP_EVENT || sysType === OsEventTypeList.SCROLL_BOTTOM_EVENT ||
+      textType === OsEventTypeList.SCROLL_TOP_EVENT || textType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+    // No-op: list is only 3 items, no scroll needed. Consumed to keep
+    // the trap order correct (scroll before click).
     return
   }
 
@@ -413,6 +446,7 @@ const unsubscribe = bridge.onEvenHubEvent((event: EvenHubEvent) => {
     return
   }
 
+  // 3. CLICK — fallback checked LAST (after DOUBLE_CLICK, SCROLL_TOP, SCROLL_BOTTOM)
   if (sysType === OsEventTypeList.CLICK_EVENT || textType === OsEventTypeList.CLICK_EVENT) {
     if (voiceMode) {
       // Fallback: if SDK exposes no per-item index, a plain tap sends Draft 1 (top item).
@@ -425,7 +459,14 @@ const unsubscribe = bridge.onEvenHubEvent((event: EvenHubEvent) => {
       lastTop3Json = ''
       fetchAndRenderTop3()
     } else {
-      toggleMic()
+      // Top-3 mode: if we're showing an error screen, retry; otherwise toggle mic
+      const isErrorScreen = lastTop3Json === JSON.stringify(['Check connection', 'Tap to retry', '']) ||
+                            lastTop3Json === JSON.stringify(['Mic error', 'Tap to retry', ''])
+      if (isErrorScreen) {
+        fetchAndRenderTop3()
+      } else {
+        toggleMic()
+      }
     }
     return
   }
