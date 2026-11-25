@@ -6,9 +6,10 @@ import {
   ListContainerProperty,
   ListItemContainerProperty,
   RebuildPageContainer,
+  EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
 import { startSttStream } from './asr/stt'
-import { mountUi, setStatus, setTranscript, setTop3, setVoice } from './ui'
+import { mountUi, setStatus, setTranscript, setTop3, setVoice, setDigest, setSent } from './ui'
 
 mountUi()
 
@@ -74,9 +75,14 @@ let stt: ReturnType<typeof startSttStream> | null = null
 let voicePollTimer: number | null = null
 
 let voiceMode = false
+let digestMode = false
 let lastVoiceId: number | null = null
+let currentVoiceResult: { id: number; transcript: string; drafts: string[]; chatId: string | null; mode?: string; bullets?: string[]; chatName?: string } | null = null
+let sendingFlag = false
+let sentTimer: number | null = null
+let sentShown = false // true while the '✓ Sent' confirm is displayed (~3 s)
 
-// Shared render helper for both top-3 and voice pages
+// Shared render helper for both top-3, voice, and digest pages
 function renderGlassesPage(headerContent: string, items: string[]) {
   const newListContainer = new ListContainerProperty({
     xPosition: 0,
@@ -123,6 +129,14 @@ function truncateTo80(s: string): string {
   return s.length > 80 ? s.slice(0, 77) + '...' : s
 }
 
+// Pure helper: extract selected list index from an EvenHubEvent if present.
+// Returns 0, 1, 2 for the three list items, or null if no list event/index.
+// SDK evidence: List_ItemEvent.currentSelectItemIndex (number) arrives in event.listEvent.
+function selectedListIndex(event: EvenHubEvent): number | null {
+  const idx = event.listEvent?.currentSelectItemIndex
+  return typeof idx === 'number' ? idx : null
+}
+
 async function fetchAndRenderTop3() {
   try {
     const res = await fetch(`${BACKEND_URL}/api/top3`)
@@ -150,8 +164,8 @@ async function fetchAndRenderTop3() {
     const top1ChatId = items.length > 0 ? items[0].chatId : null
     stt?.setContext(top1ChatId)
 
-    // Skip glasses rebuild while voice mode is active
-    if (voiceMode) return
+    // Skip glasses rebuild while voice/digest mode is active
+    if (voiceMode || digestMode) return
 
     renderGlassesPage('Glance Reply - top 3', itemName)
   } catch (err) {
@@ -159,16 +173,46 @@ async function fetchAndRenderTop3() {
   }
 }
 
-function showVoiceResult(result: { id: number; transcript: string; drafts: string[]; chatId: string | null }) {
-  voiceMode = true
+function showVoiceResult(result: { id: number; transcript: string; drafts: string[]; chatId: string | null; mode?: string; bullets?: string[]; chatName?: string }) {
+  // A new voice result cancels any pending Sent auto-return timer —
+  // otherwise the stale timer would yank this fresh result back to top-3.
+  if (sentTimer !== null) {
+    clearTimeout(sentTimer)
+    sentTimer = null
+  }
+  sentShown = false
+
+  const isDigest = result.mode === 'digest'
+
+  if (isDigest) {
+    digestMode = true
+    voiceMode = false
+  } else {
+    voiceMode = true
+    digestMode = false
+  }
   lastVoiceId = result.id
+  currentVoiceResult = result
 
-  const header = truncateTo80(result.transcript)
-  const items = (result.drafts ?? []).map(truncateTo80).concat(Array(3 - (result.drafts?.length ?? 0)).fill(''))
-
-  renderGlassesPage(header, items)
-  setVoice(result.transcript, result.drafts ?? [])
-  setStatus('listening', `Voice reply ready · tap to dismiss · double-tap to exit`)
+  if (isDigest) {
+    const header = truncateTo80(`Digest — ${result.chatName ?? 'chat'}`)
+    const items = (result.bullets ?? []).map(truncateTo80).concat(Array(3 - (result.bullets?.length ?? 0)).fill(''))
+    renderGlassesPage(header, items)
+    setDigest(result.chatName ?? 'chat', result.bullets ?? [])
+    setStatus('listening', 'Digest ready · tap to return · double-tap to exit')
+  } else {
+    const header = truncateTo80(result.transcript)
+    // Three items: Draft 1, Draft 2, "✕ Dismiss"
+    const draftItems = (result.drafts ?? []).map(truncateTo80)
+    const items = [
+      draftItems[0] ?? '',
+      draftItems[1] ?? '',
+      '✕ Dismiss',
+    ]
+    renderGlassesPage(header, items)
+    setVoice(result.transcript, result.drafts ?? [])
+    setStatus('listening', 'Voice reply ready · tap a draft to send · tap Dismiss to return · double-tap to exit')
+  }
 }
 
 // Initial fetch
@@ -183,7 +227,7 @@ async function pollVoiceLatest() {
     const res = await fetch(`${BACKEND_URL}/api/voice/latest`)
     if (!res.ok) return
     const result = await res.json()
-    if (result.id && result.id !== lastVoiceId && result.transcript) {
+    if (result.id && result.id !== lastVoiceId && (result.transcript || result.mode === 'digest')) {
       showVoiceResult(result)
     }
   } catch (err) {
@@ -229,6 +273,64 @@ function toggleMic() {
   )
 }
 
+async function sendDraft(draftIndex: number) {
+  if (sendingFlag) return
+  if (!currentVoiceResult) return
+  if (currentVoiceResult.mode === 'digest') return // cannot send from digest
+
+  sendingFlag = true
+  const voiceId = currentVoiceResult.id
+
+  try {
+    const res = await fetch(`${BACKEND_URL}/api/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ voiceId, draftIndex }),
+    })
+
+    if (res.ok) {
+      const data = await res.json()
+      if (data.ok) {
+        // Show Sent confirm
+        const sentText = currentVoiceResult.drafts[draftIndex] ?? ''
+        setSent(sentText)
+        setStatus('listening', '✓ Sent · back to top 3')
+        // Render Sent on glasses: header '✓ Sent', list = [sent draft, '', '']
+        renderGlassesPage('✓ Sent', [truncateTo80(sentText), '', ''])
+        sentShown = true
+
+        // Clear any pending sent timer
+        if (sentTimer !== null) clearTimeout(sentTimer)
+        // After ~3s return to top-3
+        sentTimer = window.setTimeout(() => {
+          sentShown = false
+          sentTimer = null
+          voiceMode = false
+          digestMode = false
+          lastTop3Json = ''
+          fetchAndRenderTop3()
+          // keep lastVoiceId so poller doesn't re-show
+        }, 3000)
+        return
+      }
+    }
+
+    // Non-200 or ok:false
+    const errText = await res.text().catch(() => '')
+    throw new Error(`HTTP ${res.status}: ${errText}`)
+  } catch (err) {
+    console.error('Send failed:', err)
+    // Show error, stay in voice mode with drafts
+    setStatus('error', 'Send failed — tap a draft to retry')
+    // Re-render voice view with stored result
+    if (currentVoiceResult && currentVoiceResult.mode !== 'digest') {
+      showVoiceResult(currentVoiceResult)
+    }
+  } finally {
+    sendingFlag = false
+  }
+}
+
 let cleanedUp = false
 function cleanup() {
   if (cleanedUp) return
@@ -237,6 +339,7 @@ function cleanup() {
   stt?.close()
   if (pollTimer !== null) clearInterval(pollTimer)
   if (voicePollTimer !== null) clearInterval(voicePollTimer)
+  if (sentTimer !== null) clearTimeout(sentTimer)
   unsubscribe()
 }
 
@@ -256,12 +359,13 @@ function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeLis
 // Event routing, critical details:
 //   • Taps/double-taps/lifecycle come through `event.sysEvent`.
 //     Audio PCM frames come through `event.audioEvent` — separate branch.
+//   • List item taps come through `event.listEvent` with `currentSelectItemIndex`.
 //   • Double-tap → `shutDownPageContainer(1)` is a root-level check: it
 //     must fire no matter which envelope the event arrives in, so users
 //     can always exit the app. System exit confirmation dialog appears;
 //     SYSTEM_EXIT_EVENT fires on confirm and we clean up there.
 //   • Check DOUBLE_CLICK_EVENT before CLICK_EVENT.
-const unsubscribe = bridge.onEvenHubEvent((event) => {
+const unsubscribe = bridge.onEvenHubEvent((event: EvenHubEvent) => {
   const pcm = event.audioEvent?.audioPcm
   if (pcm) stt?.sendPcm(pcm)
 
@@ -273,15 +377,53 @@ const unsubscribe = bridge.onEvenHubEvent((event) => {
     return
   }
 
+  // While the Sent confirm is showing (~3 s), ignore single taps — otherwise
+  // a tap on the Sent page would re-send the same draft. Lifecycle events
+  // (SYSTEM_EXIT / ABNORMAL_EXIT) still fall through to cleanup below.
+  const isLifecycle = sysType === OsEventTypeList.SYSTEM_EXIT_EVENT || sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT
+  if (sentShown && !isLifecycle) return
+
+  // List item selection (tap on a list item) — arrives as listEvent.
+  // currentSelectItemIndex is present when an item is focused/selected
+  // (sim: after up/down navigation; hardware: the focused item). A list tap
+  // with NO index (sim bare click, or firmware that never populates the
+  // field) defaults to the top item (index 0) — the glance default: tap =
+  // send Draft 1. Never invent an index; 0 is the focused/default item
+  // when no selection is reported.
+  const listIdx = selectedListIndex(event)
+  if (event.listEvent && (voiceMode || digestMode)) {
+    const idx = listIdx ?? 0
+    if (voiceMode) {
+      if (idx === 0 || idx === 1) {
+        sendDraft(idx)
+      } else if (idx === 2) {
+        // Dismiss (item 2 = "✕ Dismiss")
+        voiceMode = false
+        lastTop3Json = ''
+        fetchAndRenderTop3()
+        // keep lastVoiceId so the voice poller does NOT re-show the dismissed result
+      }
+    } else if (digestMode) {
+      // glance-friendly: any tap in digest mode returns to top-3
+      digestMode = false
+      lastTop3Json = ''
+      fetchAndRenderTop3()
+      // keep lastVoiceId so the poller does not re-show the digest
+    }
+    return
+  }
+
   if (sysType === OsEventTypeList.CLICK_EVENT || textType === OsEventTypeList.CLICK_EVENT) {
     if (voiceMode) {
-      // Exit voice mode, back to top-3. Keep lastVoiceId so the voice
-      // poller does NOT re-show the dismissed result 5s later; reset
-      // lastTop3Json so fetchAndRenderTop3 actually re-renders the
-      // glasses (it early-returns when the top-3 list is unchanged).
-      voiceMode = false
+      // Fallback: if SDK exposes no per-item index, a plain tap sends Draft 1 (top item).
+      // SDK evidence: List_ItemEvent.currentSelectItemIndex exists and is parsed above.
+      // This branch only runs when listEvent is absent (e.g., tap on header area).
+      sendDraft(0)
+    } else if (digestMode) {
+      // Fallback for digest: same as list tap
+      digestMode = false
       lastTop3Json = ''
-      fetchAndRenderTop3() // immediate re-render of top-3
+      fetchAndRenderTop3()
     } else {
       toggleMic()
     }

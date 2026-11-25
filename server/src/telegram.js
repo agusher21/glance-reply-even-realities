@@ -32,6 +32,7 @@ export function chatTypeOf(telegramType) {
  * Returns null for updates without a text message (stickers, joins, etc.).
  * `botUsername` (without '@') is used to detect @mentions of the bot;
  * pass null/undefined when unknown — mentionsBot is then false.
+ * Adds `messageId: msg.message_id ?? null` to the returned item.
  */
 export function normalizeUpdate(update, botUsername) {
   const msg = update?.message ?? update?.channel_post;
@@ -54,6 +55,7 @@ export function normalizeUpdate(update, botUsername) {
     // Telegram `date` is unix seconds -> store ms.
     time: (msg.date ?? Math.floor(Date.now() / 1000)) * 1000,
     mentionsBot,
+    messageId: msg.message_id ?? null,
   };
 }
 

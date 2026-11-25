@@ -1,5 +1,5 @@
 // Speech-to-text client for the G2 microphone.
-//
+// 
 // The G2 mic emits PCM s16le @ 16 kHz, mono via `bridge.audioControl(true)`.
 // Each onEvenHubEvent callback with `audioEvent.audioPcm` delivers a chunk.
 //
@@ -10,12 +10,29 @@
 // backend at `${backendUrl}/api/voice?chatId=<ctx>` as raw PCM
 // (Content-Type: audio/pcm). The backend runs Groq Whisper + LLM drafts
 // and returns {id, transcript, drafts, chatId, originalText, createdAt}.
+// For digest mode, the backend returns {id, mode: 'digest', transcript: 'digest',
+// bullets: string[], drafts: string[], chatId, chatName, createdAt}.
 // ─────────────────────────────────────────────────────────────────────
 
 export interface SttSnapshot {
   finalText: string
   interimText: string
   finished: boolean
+}
+
+// Result shape from backend /api/voice (reply or digest)
+// stt.ts only forwards the JSON fields — do not add new network calls.
+export interface VoiceResult {
+  id: number
+  transcript: string
+  drafts: string[]
+  chatId: string | null
+  mode?: 'reply' | 'digest'
+  bullets?: string[]
+  chatName?: string
+  originalText?: string
+  replyToMessageId?: number | null
+  createdAt?: string
 }
 
 export interface SttClient {
@@ -28,7 +45,7 @@ export function startSttStream(
   backendUrl: string,
   onSnapshot: (snap: SttSnapshot) => void,
   onError?: (err: unknown) => void,
-  onDrafts?: (result: { id: number; transcript: string; drafts: string[]; chatId: string | null }) => void,
+  onDrafts?: (result: VoiceResult) => void,
 ): SttClient {
   if (!backendUrl) {
     throw new Error('Voice backend URL not set')
@@ -70,14 +87,14 @@ export function startSttStream(
       }
 
       const result = await res.json()
-      const { id, transcript, drafts, chatId: resultChatId } = result
+      const { id, transcript, drafts, chatId: resultChatId, mode, bullets, chatName, originalText, replyToMessageId, createdAt } = result
 
       onSnapshot({
         finalText: transcript ?? '',
         interimText: '',
         finished: false,
       })
-      onDrafts?.({ id: id ?? 0, transcript: transcript ?? '', drafts: drafts ?? [], chatId: resultChatId ?? null })
+      onDrafts?.({ id: id ?? 0, transcript: transcript ?? '', drafts: drafts ?? [], chatId: resultChatId ?? null, mode, bullets, chatName, originalText, replyToMessageId, createdAt })
     } catch (err) {
       onError?.(err)
     } finally {

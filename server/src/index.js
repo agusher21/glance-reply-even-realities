@@ -1,9 +1,12 @@
-// index.js — Glance Reply backend (Day 1 skeleton).
+// index.js — Glance Reply backend (Day 1 skeleton + Day 3 voice + Day 4 send).
 //
 // HTTP server, plain Node 24, no dependencies:
-//   GET /healthz   -> {"ok":true}
-//   GET /api/top3  -> JSON array: top-3 ranked unread items
-//   GET /api/unread -> JSON array: all unread items (debug helper)
+//   GET /healthz        -> {"ok":true}
+//   GET /api/top3       -> JSON array: top-3 ranked unread items
+//   GET /api/unread     -> JSON array: all unread items (debug helper)
+//   POST /api/voice     -> voice pipeline (STT + LLM drafts/digest)
+//   GET /api/voice/latest -> latest voice result
+//   POST /api/send      -> send a draft to Telegram
 //
 // Modes:
 //   * Live: TELEGRAM_BOT_TOKEN in env -> getUpdates long-poll feeds the
@@ -23,6 +26,7 @@ import { UnreadStore } from './store.js';
 import { rankUnread } from './rank.js';
 import { createPollerFromEnv } from './telegram.js';
 import { handleVoice, getLatestVoice } from './voice.js';
+import { handleSend } from './send.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
 const DEMO_MODE = process.env.DEMO_MODE === '1' || process.argv.includes('--demo');
@@ -33,20 +37,42 @@ const store = new UnreadStore();
 function seedDemo() {
   const now = Date.now();
   const min = 60_000;
+
+  // First: seed ~10 extra Crypto Alpha messages into chat g2 (messageIds 1010-1019)
+  // These go into history ONLY, not as latest entry (they are older than the @mention).
+  const extraG2 = [
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'BTC broke 98k, ETH following', time: now - 180 * min, mentionsBot: false, messageId: 1010 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'ETF inflows hit $2.3B yesterday', time: now - 165 * min, mentionsBot: false, messageId: 1011 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'Binance adds SOL/USDC perpetuals', time: now - 150 * min, mentionsBot: false, messageId: 1012 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'MicroStrategy buys another 5k BTC', time: now - 135 * min, mentionsBot: false, messageId: 1013 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'ETH staking yield at 3.2% APR', time: now - 120 * min, mentionsBot: false, messageId: 1014 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'Coinbase lists new AI agent tokens', time: now - 105 * min, mentionsBot: false, messageId: 1015 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'USDT market cap hits $140B', time: now - 90 * min, mentionsBot: false, messageId: 1016 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'Solana DEX volume beats Ethereum', time: now - 75 * min, mentionsBot: false, messageId: 1017 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'BlackRock BUIDL fund crosses $500M', time: now - 60 * min, mentionsBot: false, messageId: 1018 },
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: 'Base TVL up 40% this month', time: now - 10 * min, mentionsBot: false, messageId: 1019 },
+  ];
+  for (const item of extraG2) store.upsert(item);
+
+  // Then: the 5 canned items with messageIds (d2:1001, d1:1002, g2:1003, g1:1004, c1:1005)
+  // CRITICAL: the g2 @mention (messageId 1003) is upserted LAST among g2's messages
+  // so g2's latest entry stays the @mention and top-3 order is UNCHANGED (d2 > d1 > g2).
   const demo = [
     // Plain group message — the NEWEST overall, but tier 2: must NOT make top 3.
-    { chatId: 'g1', chatType: 'group', sender: 'Crypto Alpha', text: 'gm everyone, BTC pumping', time: now - 0.5 * min, mentionsBot: false },
+    { chatId: 'g1', chatType: 'group', sender: 'Crypto Alpha', text: 'gm everyone, BTC pumping', time: now - 0.5 * min, mentionsBot: false, messageId: 1004 },
     // Group @mention — newer than both DMs, tier 1: ranks #3, below the DMs.
-    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: '@glance_reply_bot tolong rangkum dong', time: now - 1 * min, mentionsBot: true },
+    // This is upserted AFTER the extraG2 messages, so it becomes g2's latest entry.
+    { chatId: 'g2', chatType: 'group', sender: 'Crypto Alpha', text: '@glance_reply_bot tolong rangkum dong', time: now - 1 * min, mentionsBot: true, messageId: 1003 },
     // Older DM — ranks #2.
-    { chatId: 'd1', chatType: 'dm', sender: 'Ayu', text: 'Nanti kabarin ya', time: now - 15 * min, mentionsBot: false },
+    { chatId: 'd1', chatType: 'dm', sender: 'Ayu', text: 'Nanti kabarin ya', time: now - 15 * min, mentionsBot: false, messageId: 1002 },
     // Newer DM — ranks #1 (newest within the DM tier).
-    { chatId: 'd2', chatType: 'dm', sender: 'Budi', text: 'Bro, jadi meet jam 7?', time: now - 2 * min, mentionsBot: false },
+    { chatId: 'd2', chatType: 'dm', sender: 'Budi', text: 'Bro, jadi meet jam 7?', time: now - 2 * min, mentionsBot: false, messageId: 1001 },
     // Plain channel message — tier 2, outside the top 3.
-    { chatId: 'c1', chatType: 'channel', sender: 'Banzai News', text: 'Update: testnet v2 live', time: now - 5 * min, mentionsBot: false },
+    { chatId: 'c1', chatType: 'channel', sender: 'Banzai News', text: 'Update: testnet v2 live', time: now - 5 * min, mentionsBot: false, messageId: 1005 },
   ];
   for (const item of demo) store.upsert(item);
-  console.log(`[server] DEMO_MODE: seeded ${demo.length} canned updates (no Telegram token used)`);
+
+  console.log(`[server] DEMO_MODE: seeded ${extraG2.length + demo.length} canned updates (${extraG2.length} extra g2 history + ${demo.length} latest) (no Telegram token used)`);
 }
 
 if (DEMO_MODE) {
@@ -103,6 +129,9 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET' && url.pathname === '/api/voice/latest') {
     return sendJson(res, 200, getLatestVoice());
+  }
+  if (req.method === 'POST' && url.pathname === '/api/send') {
+    return handleSend(req, res, store, getLatestVoice);
   }
   return sendJson(res, 404, { error: 'not found' });
 });

@@ -12,6 +12,11 @@ let top3El: HTMLUListElement
 let voiceEl: HTMLDivElement
 let voiceTranscriptEl: HTMLDivElement
 let voiceDraftsEl: HTMLUListElement
+let digestEl: HTMLDivElement
+let digestHeadingEl: HTMLDivElement
+let digestBulletsEl: HTMLUListElement
+let sentEl: HTMLDivElement
+let sentTextEl: HTMLDivElement
 
 export function mountUi() {
   const app = document.querySelector<HTMLDivElement>('#app')!
@@ -33,6 +38,15 @@ export function mountUi() {
         <div id="voice-transcript" class="voice-transcript"></div>
         <ul id="voice-drafts" class="voice-drafts"></ul>
       </section>
+      <section class="digest" id="digest" style="display: none;">
+        <h2>Digest</h2>
+        <div id="digest-heading" class="digest-heading"></div>
+        <ul id="digest-bullets" class="digest-bullets"></ul>
+      </section>
+      <section class="sent" id="sent" style="display: none;">
+        <h2>Sent</h2>
+        <div id="sent-text" class="sent-text"></div>
+      </section>
       <footer>Tap the glasses temple to pause · double-tap to exit.</footer>
     </main>
   `
@@ -43,6 +57,11 @@ export function mountUi() {
   voiceEl = app.querySelector<HTMLDivElement>('#voice')!
   voiceTranscriptEl = app.querySelector<HTMLDivElement>('#voice-transcript')!
   voiceDraftsEl = app.querySelector<HTMLUListElement>('#voice-drafts')!
+  digestEl = app.querySelector<HTMLDivElement>('#digest')!
+  digestHeadingEl = app.querySelector<HTMLDivElement>('#digest-heading')!
+  digestBulletsEl = app.querySelector<HTMLUListElement>('#digest-bullets')!
+  sentEl = app.querySelector<HTMLDivElement>('#sent')!
+  sentTextEl = app.querySelector<HTMLDivElement>('#sent-text')!
   injectStyles()
 }
 
@@ -71,11 +90,35 @@ export function setTop3(items: Top3Item[]) {
 
 export function setVoice(transcript: string, drafts: string[]) {
   if (!voiceEl || !voiceTranscriptEl || !voiceDraftsEl) return
+  // Hide other panels
   voiceEl.style.display = 'block'
+  if (digestEl) digestEl.style.display = 'none'
+  if (sentEl) sentEl.style.display = 'none'
   voiceTranscriptEl.innerHTML = `<strong>You said:</strong> ${escapeHtml(transcript)}`
   voiceDraftsEl.innerHTML = drafts
     .map((d, i) => `<li><strong>Draft ${i + 1}:</strong> ${escapeHtml(d)}</li>`)
     .join('')
+}
+
+export function setDigest(chatName: string, bullets: string[]) {
+  if (!digestEl || !digestHeadingEl || !digestBulletsEl) return
+  // Hide other panels
+  digestEl.style.display = 'block'
+  if (voiceEl) voiceEl.style.display = 'none'
+  if (sentEl) sentEl.style.display = 'none'
+  digestHeadingEl.innerHTML = `<strong>Digest — ${escapeHtml(chatName)}</strong>`
+  digestBulletsEl.innerHTML = bullets
+    .map((b, i) => `<li><strong>Bullet ${i + 1}:</strong> ${escapeHtml(b)}</li>`)
+    .join('')
+}
+
+export function setSent(draftText: string) {
+  if (!sentEl || !sentTextEl) return
+  // Hide other panels
+  sentEl.style.display = 'block'
+  if (voiceEl) voiceEl.style.display = 'none'
+  if (digestEl) digestEl.style.display = 'none'
+  sentTextEl.innerHTML = `<strong>Sent:</strong> ${escapeHtml(draftText)}`
 }
 
 function escapeHtml(s: string) {
@@ -125,6 +168,17 @@ function injectStyles() {
     .voice-drafts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
     .voice-drafts li { font-size: 15px; line-height: 1.4; color: #E5E5E5; padding: 10px; background: #3E3E3E; border-radius: 8px; }
     .voice-drafts li strong { color: #FFD600; }
+    .digest { background: #2E2E2E; border: 1px solid #3E3E3E; border-radius: 12px; padding: 16px; }
+    .digest h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: #A7A7A7; text-transform: uppercase; letter-spacing: 0.04em; }
+    .digest-heading { font-size: 15px; line-height: 1.4; color: #E5E5E5; margin-bottom: 12px; padding: 12px; background: #3E3E3E; border-radius: 8px; }
+    .digest-heading strong { color: #3CFA44; }
+    .digest-bullets { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    .digest-bullets li { font-size: 15px; line-height: 1.4; color: #E5E5E5; padding: 10px; background: #3E3E3E; border-radius: 8px; }
+    .digest-bullets li strong { color: #FFD600; }
+    .sent { background: #2E2E2E; border: 1px solid #3E3E3E; border-radius: 12px; padding: 16px; }
+    .sent h2 { font-size: 14px; font-weight: 600; margin: 0 0 12px; color: #A7A7A7; text-transform: uppercase; letter-spacing: 0.04em; }
+    .sent-text { font-size: 15px; line-height: 1.4; color: #E5E5E5; padding: 12px; background: #3E3E3E; border-radius: 8px; }
+    .sent-text strong { color: #3CFA44; }
     footer { font-size: 12px; color: #7B7B7B; text-align: center; }
   `
   const style = document.createElement('style')

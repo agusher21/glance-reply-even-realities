@@ -1,15 +1,17 @@
-// voice.js — Glance Reply voice pipeline (Day 3).
+// voice.js — Glance Reply voice pipeline (Day 3 + Day 4 digest).
 //
 // Plain Node 24, no dependencies (global fetch, FormData).
 //
 // Exports:
 //   - wrapPcmToWav(pcm: Buffer): Buffer
 //   - parseDrafts(text: string): string[]
+//   - parseBullets(text: string): string[]
 //   - handleVoice(req, res, store): Promise<void>
 //   - getLatestVoice(): object
 
 import http from 'node:http';
 import { strict as assert } from 'node:assert';
+import { rankUnread } from './rank.js';
 
 const GROQ_STT_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
 const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
@@ -110,6 +112,55 @@ export function parseDrafts(text) {
 }
 
 /**
+ * Parse LLM reply text into clean bullet strings (for digest mode).
+ * Accepts: JSON array, JSON object with 'bullets' key, or plain lines.
+ * Strips leading numbering ("1.", "1)", "- ", "* "), strips surrounding quotes.
+ * Drops empties, takes first 3, truncates each to 80 chars.
+ * @param {string} text - Raw LLM response
+ * @returns {string[]} - Clean bullets (max 3, each <= 80 chars)
+ */
+export function parseBullets(text) {
+  if (!text || typeof text !== 'string') return [];
+
+  let bullets = [];
+
+  // Try JSON array first
+  try {
+    const parsed = JSON.parse(text.trim());
+    if (Array.isArray(parsed)) {
+      bullets = parsed.filter(b => typeof b === 'string');
+    } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.bullets)) {
+      bullets = parsed.bullets.filter(b => typeof b === 'string');
+    }
+  } catch {
+    // Not JSON, fall through to line parsing
+  }
+
+  // If JSON parsing didn't yield bullets, parse as plain lines
+  if (bullets.length === 0) {
+    bullets = text
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line.length > 0);
+  }
+
+  // Clean each bullet
+  const cleaned = bullets.map(b => {
+    let s = b.trim();
+    // Strip leading numbering: "1.", "1)", "- ", "* "
+    s = s.replace(/^(\d+[.)]|[-*])\s*/, '');
+    // Strip surrounding quotes (single or double)
+    if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+      s = s.slice(1, -1);
+    }
+    return s.trim();
+  }).filter(s => s.length > 0);
+
+  // Take first 3, truncate to 80 chars
+  return cleaned.slice(0, 3).map(s => s.slice(0, 80));
+}
+
+/**
  * Read the full request body with a size cap.
  * @param {http.IncomingMessage} req
  * @param {number} maxBytes - Default 5 MB
@@ -130,6 +181,61 @@ async function readBody(req, maxBytes = 5 * 1024 * 1024) {
     req.on('end', () => resolve(Buffer.concat(chunks, total)));
     req.on('error', reject);
   });
+}
+
+/**
+ * Shared Groq chat completions POST with 429 retry.
+ * Used by both groqDrafts and digest path.
+ * @param {Array<{role:string, content:string}>} messages
+ * @param {string} apiKey
+ * @returns {Promise<string>} - Raw LLM response content
+ */
+async function groqChat(messages, apiKey) {
+  const payload = {
+    model: 'openai/gpt-oss-120b',
+    messages,
+    temperature: 0.7,
+    max_tokens: 200,
+  };
+
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const res = await fetch(GROQ_CHAT_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'User-Agent': BROWSER_UA,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (res.status === 429) {
+      let waitMs = 2000 * attempt;
+      const retryAfter = res.headers.get('retry-after');
+      if (retryAfter) {
+        const sec = parseInt(retryAfter, 10);
+        if (!isNaN(sec)) waitMs = sec * 1000;
+      }
+      console.log(`[voice] Groq chat 429 (attempt ${attempt}/3), waiting ${waitMs}ms`);
+      await new Promise(r => setTimeout(r, waitMs));
+      continue;
+    }
+
+    if (!res.ok) {
+      const txt = await res.text().catch(() => '');
+      lastErr = new Error(`Groq chat ${res.status}: ${txt}`);
+      console.log(`[voice] Groq chat error: ${lastErr.message}`);
+      break;
+    }
+
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content ?? '';
+    console.log(`[voice] Groq chat ok, response length ${content.length}`);
+    return content;
+  }
+
+  throw lastErr || new Error('Groq chat failed after retries');
 }
 
 /**
@@ -215,9 +321,9 @@ async function deepgramStt(wavBytes, apiKey) {
 }
 
 /**
- * POST to Groq chat completions for draft replies, with 429 retry.
+ * Generate draft replies via Groq chat.
  * @param {string} transcript
- * @param {string|null} originalText - The original message text (or null)
+ * @param {string|null} originalText
  * @param {string} apiKey
  * @returns {Promise<string[]>} - Two draft replies
  */
@@ -228,54 +334,43 @@ async function groqDrafts(transcript, originalText, apiKey) {
     ? `Original message: "${originalText}"\nTranscript: "${transcript}"`
     : `Transcript: "${transcript}"`;
 
-  const payload = {
-    model: 'openai/gpt-oss-120b',
-    messages: [
+  const content = await groqChat(
+    [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userContent },
     ],
-    temperature: 0.7,
-    max_tokens: 200,
-  };
+    apiKey,
+  );
+  return parseDrafts(content);
+}
 
-  let lastErr;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const res = await fetch(GROQ_CHAT_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'User-Agent': BROWSER_UA,
-      },
-      body: JSON.stringify(payload),
-    });
+/**
+ * Generate digest bullets via Groq chat.
+ * @param {Array<{sender:string, text:string, time:number}>} history - Last 20 messages, oldest first
+ * @param {string} chatName
+ * @param {string} apiKey
+ * @returns {Promise<string[]>} - Three bullet strings
+ */
+async function groqDigest(history, chatName, apiKey) {
+  const systemPrompt = `Summarize these chat messages into EXACTLY 3 short bullets, one per line, each at most 80 characters, in the same language as the messages. No numbering, no quotes, no extra text.`;
 
-    if (res.status === 429) {
-      let waitMs = 2000 * attempt;
-      const retryAfter = res.headers.get('retry-after');
-      if (retryAfter) {
-        const sec = parseInt(retryAfter, 10);
-        if (!isNaN(sec)) waitMs = sec * 1000;
-      }
-      console.log(`[voice] Groq chat 429 (attempt ${attempt}/3), waiting ${waitMs}ms`);
-      await new Promise(r => setTimeout(r, waitMs));
-      continue;
-    }
+  // Build user content: "sender: text" lines, truncate each message text to 200 chars
+  const lines = history.map(m => `${m.sender}: ${m.text.slice(0, 200)}`);
+  let userContent = lines.join('\n');
 
-    if (!res.ok) {
-      const txt = await res.text().catch(() => '');
-      lastErr = new Error(`Groq chat ${res.status}: ${txt}`);
-      console.log(`[voice] Groq chat error: ${lastErr.message}`);
-      break;
-    }
-
-    const data = await res.json();
-    const content = data?.choices?.[0]?.message?.content ?? '';
-    console.log(`[voice] Groq chat ok, response length ${content.length}`);
-    return parseDrafts(content);
+  // Cap whole user content at ~4000 chars
+  if (userContent.length > 4000) {
+    userContent = userContent.slice(-4000); // Keep the most recent (end)
   }
 
-  throw lastErr || new Error('Groq chat failed after retries');
+  const content = await groqChat(
+    [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userContent },
+    ],
+    apiKey,
+  );
+  return parseBullets(content);
 }
 
 /**
@@ -347,12 +442,75 @@ export async function handleVoice(req, res, store) {
     return;
   }
 
-  // Look up original message by chatId query param
+  // Check for DIGEST intent BEFORE drafting replies
   const url = new URL(req.url, 'http://localhost');
-  const chatId = url.searchParams.get('chatId');
+  const chatIdParam = url.searchParams.get('chatId');
+  const transcriptLower = transcript.trim().toLowerCase();
+
+  if (transcriptLower === 'digest') {
+    // DIGEST PATH
+    // Target chat: ?chatId= if given AND store.get(chatId) exists; otherwise top-1 from rankUnread
+    let targetChatId = null;
+    if (chatIdParam && store.get(chatIdParam)) {
+      targetChatId = chatIdParam;
+    } else {
+      const ranked = rankUnread(store.list());
+      targetChatId = ranked[0]?.chatId ?? null;
+    }
+
+    if (!targetChatId) {
+      res.writeHead(503, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+      res.end(JSON.stringify({ error: 'no_chat_for_digest' }));
+      return;
+    }
+
+    const history = store.history(targetChatId);
+    if (!history.length) {
+      res.writeHead(503, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+      res.end(JSON.stringify({ error: 'no_history' }));
+      return;
+    }
+
+    // Take last 20 (history is already capped at 20, oldest first)
+    const recentHistory = history.slice(-20);
+    const chatEntry = store.get(targetChatId);
+    const chatName = chatEntry?.sender ?? targetChatId;
+
+    let bullets;
+    try {
+      bullets = await groqDigest(recentHistory, chatName, groqKey);
+    } catch (err) {
+      console.log(`[voice] Digest generation failed: ${err.message}`);
+      res.writeHead(503, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+      res.end(JSON.stringify({ error: 'digest_unavailable' }));
+      return;
+    }
+
+    // Store and return digest result
+    voiceResultId += 1;
+    const result = {
+      id: voiceResultId,
+      mode: 'digest',
+      transcript,
+      bullets,
+      drafts: bullets, // same array, so older clients still see drafts
+      chatId: targetChatId,
+      chatName,
+      createdAt: new Date().toISOString(),
+    };
+    latestVoiceResult = result;
+    console.log(`[voice] digest result id=${voiceResultId} chatId=${targetChatId} bullets=${bullets.length}`);
+
+    res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
+  // DRAFT PATH (existing behavior)
+  // Look up original message by chatId query param
   let originalText = null;
-  if (chatId) {
-    const entry = store.get(chatId);
+  if (chatIdParam) {
+    const entry = store.get(chatIdParam);
     if (entry) originalText = entry.text;
   }
 
@@ -367,18 +525,23 @@ export async function handleVoice(req, res, store) {
     return;
   }
 
-  // Store and return result
+  // Store and return result with mode: 'reply' and replyToMessageId
   voiceResultId += 1;
+  const entry = chatIdParam ? store.get(chatIdParam) : null;
+  const replyToMessageId = entry?.messageId ?? null;
+
   const result = {
     id: voiceResultId,
+    mode: 'reply',
     transcript,
     drafts,
-    chatId: chatId || null,
+    chatId: chatIdParam || null,
     originalText: originalText || null,
+    replyToMessageId,
     createdAt: new Date().toISOString(),
   };
   latestVoiceResult = result;
-  console.log(`[voice] result id=${voiceResultId} transcript_len=${transcript.length} drafts=${drafts.length} chatId=${chatId ?? 'none'}`);
+  console.log(`[voice] reply result id=${voiceResultId} transcript_len=${transcript.length} drafts=${drafts.length} chatId=${chatIdParam ?? 'none'} replyToMessageId=${replyToMessageId ?? 'null'}`);
 
   res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
   res.end(JSON.stringify(result));
@@ -444,6 +607,7 @@ function selfTest() {
   assert.equal(parsed3[0], 'Obj draft 1');
   assert.equal(parsed3[1], 'Obj draft 2');
   console.log('parseDrafts (JSON object drafts): PASS');
+  console.log('  drafts:', parsed3);
 
   // Test parseDrafts with quoted lines
   const quotedInput = `1. "Quoted reply one"
@@ -452,6 +616,54 @@ function selfTest() {
   assert.equal(parsed4[0], 'Quoted reply one', 'strips double quotes');
   assert.equal(parsed4[1], 'Quoted reply two', 'strips single quotes');
   console.log('parseDrafts (quoted): PASS');
+  console.log('  drafts:', parsed4);
+
+  // Test parseBullets with numbered lines
+  const bulletNumbered = `1. First bullet point here
+2. Second bullet point here
+3. Third bullet point here
+4. Fourth should be dropped`;
+  const bullets1 = parseBullets(bulletNumbered);
+  assert.equal(bullets1.length, 3, 'takes first 3');
+  assert.ok(bullets1[0].length <= 80, 'first <= 80 chars');
+  assert.ok(bullets1[1].length <= 80, 'second <= 80 chars');
+  assert.ok(bullets1[2].length <= 80, 'third <= 80 chars');
+  assert.ok(!bullets1[0].match(/^\d+[.)]/), 'no leading number on first');
+  assert.ok(!bullets1[1].match(/^\d+[.)]/), 'no leading number on second');
+  assert.ok(!bullets1[2].match(/^\d+[.)]/), 'no leading number on third');
+  console.log('parseBullets (numbered lines): PASS');
+  console.log('  bullets:', bullets1);
+
+  // Test parseBullets with JSON array
+  const bulletJsonArray = `["Bullet one from JSON", "Bullet two from JSON", "Bullet three from JSON", "Bullet four dropped"]`;
+  const bullets2 = parseBullets(bulletJsonArray);
+  assert.equal(bullets2.length, 3, 'JSON array: takes first 3');
+  assert.equal(bullets2[0], 'Bullet one from JSON');
+  assert.equal(bullets2[1], 'Bullet two from JSON');
+  assert.equal(bullets2[2], 'Bullet three from JSON');
+  console.log('parseBullets (JSON array): PASS');
+  console.log('  bullets:', bullets2);
+
+  // Test parseBullets with JSON object with bullets key
+  const bulletJsonObject = `{"bullets": ["Obj bullet 1", "Obj bullet 2", "Obj bullet 3"]}`;
+  const bullets3 = parseBullets(bulletJsonObject);
+  assert.equal(bullets3.length, 3, 'JSON object bullets: takes 3');
+  assert.equal(bullets3[0], 'Obj bullet 1');
+  assert.equal(bullets3[1], 'Obj bullet 2');
+  assert.equal(bullets3[2], 'Obj bullet 3');
+  console.log('parseBullets (JSON object bullets): PASS');
+  console.log('  bullets:', bullets3);
+
+  // Test parseBullets with quoted lines
+  const bulletQuoted = `1. "Quoted bullet one"
+2. 'Quoted bullet two'
+3. "Quoted bullet three"`;
+  const bullets4 = parseBullets(bulletQuoted);
+  assert.equal(bullets4[0], 'Quoted bullet one', 'strips double quotes');
+  assert.equal(bullets4[1], 'Quoted bullet two', 'strips single quotes');
+  assert.equal(bullets4[2], 'Quoted bullet three', 'strips double quotes');
+  console.log('parseBullets (quoted): PASS');
+  console.log('  bullets:', bullets4);
 
   console.log('voice.js --self-test: PASS');
   console.log('  all helper tests passed');
