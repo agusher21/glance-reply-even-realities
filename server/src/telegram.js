@@ -196,5 +196,6 @@ export function createPollerFromEnv(onUpdate) {
     );
     return null;
   }
-  return new TelegramPoller({ token, onUpdate });
+  const pollTimeoutSec = Number(process.env.TELEGRAM_POLL_TIMEOUT_SEC ?? 30);
+  return new TelegramPoller({ token, onUpdate, pollTimeoutSec });
 }
