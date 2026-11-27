@@ -445,7 +445,7 @@ export async function handleVoice(req, res, store) {
   // Check for DIGEST intent BEFORE drafting replies
   const url = new URL(req.url, 'http://localhost');
   const chatIdParam = url.searchParams.get('chatId');
-  const transcriptLower = transcript.trim().toLowerCase();
+  const transcriptLower = transcript.trim().toLowerCase().replace(/[.!?]+$/, '');
 
   if (transcriptLower === 'digest') {
     // DIGEST PATH
